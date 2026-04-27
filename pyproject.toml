@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "color-adjust"
+version = "0.1.0"
+description = "Fit and apply 3D LUTs to preserve image content while transferring diffusion recolorings."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.23",
+    "Pillow>=9.0",
+]
+
+[project.optional-dependencies]
+diffusion = [
+    "accelerate>=0.20",
+    "diffusers>=0.25",
+    "safetensors>=0.4",
+    "torch>=2.0",
+    "transformers>=4.35",
+]
+diffusion-rocm = [
+    # Install torch separately from the official PyTorch ROCm wheel index first.
+    # pyproject.toml cannot reliably select an alternate package index for only
+    # one optional dependency group. Accelerate is intentionally omitted because
+    # it depends on torch and would make pip resolve torch from the default index
+    # if the ROCm wheel was not installed first.
+    "diffusers>=0.25",
+    "safetensors>=0.4",
+    "transformers>=4.35",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+color-adjust = "color_adjust.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
