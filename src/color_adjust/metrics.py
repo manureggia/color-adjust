@@ -6,11 +6,24 @@ import numpy as np
 
 
 def _as_float_image(image: np.ndarray) -> np.ndarray:
-    array = np.asarray(image, dtype=np.float64)
+    array = np.asarray(image)
+    if not np.issubdtype(array.dtype, np.number):
+        raise ValueError("Expected a numeric image array.")
+    array = array.astype(np.float64, copy=False)
     if array.ndim == 2:
         array = array[..., None]
     if array.ndim != 3:
         raise ValueError("Expected an image with shape HxW or HxWxC.")
+    if not np.isfinite(array).all():
+        raise ValueError("Image contains NaN or infinite values.")
+    min_value = float(array.min(initial=0.0))
+    max_value = float(array.max(initial=0.0))
+    if min_value < 0.0:
+        raise ValueError("Image values must be non-negative.")
+    if max_value > 1.0:
+        if max_value > 255.0:
+            raise ValueError("Image values must be in [0, 1] or [0, 255].")
+        array = array / 255.0
     return np.clip(array, 0.0, 1.0)
 
 
@@ -105,4 +118,3 @@ def _global_ssim(
         denominator = (mu_x * mu_x + mu_y * mu_y + c1) * (var_x + var_y + c2)
         scores.append(numerator / max(denominator, 1e-12))
     return float(np.mean(scores))
-

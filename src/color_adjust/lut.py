@@ -106,6 +106,8 @@ def fit_lut(
         raise ValueError(f"Image shapes differ: {source.shape} != {target.shape}")
     if size < 2:
         raise ValueError("LUT size must be >= 2.")
+    if smooth_iterations < 0:
+        raise ValueError("smooth_iterations must be >= 0.")
     if identity_weight < 0:
         raise ValueError("identity_weight must be >= 0.")
 
@@ -134,9 +136,22 @@ def fit_lut(
 
 
 def _validate_rgb_image(image: np.ndarray) -> np.ndarray:
-    array = np.asarray(image, dtype=np.float32)
+    array = np.asarray(image)
     if array.ndim != 3 or array.shape[-1] != 3:
         raise ValueError("Expected an RGB image with shape HxWx3.")
+    if not np.issubdtype(array.dtype, np.number):
+        raise ValueError("Expected a numeric RGB image array.")
+    array = array.astype(np.float32, copy=False)
+    if not np.isfinite(array).all():
+        raise ValueError("RGB image contains NaN or infinite values.")
+    min_value = float(array.min(initial=0.0))
+    max_value = float(array.max(initial=0.0))
+    if min_value < 0.0:
+        raise ValueError("RGB image values must be non-negative.")
+    if max_value > 1.0:
+        if max_value > 255.0:
+            raise ValueError("RGB image values must be in [0, 1] or [0, 255].")
+        array = array / 255.0
     return np.clip(array, 0.0, 1.0)
 
 
@@ -147,6 +162,8 @@ def _sample_pairs(
     seed: int | None,
     luma_tolerance: float | None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    # Pixel correspondence is positional: source[i, j] maps to target[i, j].
+    # This is reliable only when the target preserves scene geometry.
     src = source.reshape(-1, 3)
     tgt = target.reshape(-1, 3)
     if luma_tolerance is not None:

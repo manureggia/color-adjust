@@ -12,6 +12,16 @@ def test_identity_lut_leaves_image_unchanged():
     np.testing.assert_allclose(output, image, atol=1e-6)
 
 
+def test_lut_accepts_uint8_rgb_inputs_consistently():
+    image = np.full((4, 5, 3), [64, 128, 192], dtype=np.uint8)
+    output = LUT3D.identity(17).apply(image)
+    np.testing.assert_allclose(
+        output,
+        image.astype(np.float32) / 255.0,
+        atol=1e-6,
+    )
+
+
 def test_fit_lut_approximates_smooth_color_transform():
     rng = np.random.default_rng(2)
     source = rng.random((80, 80, 3), dtype=np.float32)

@@ -7,7 +7,21 @@ from typing import Literal
 from PIL import Image
 
 
-DiffusionBackend = Literal["instruct-pix2pix", "sd15", "sdxl", "sdxl-turbo"]
+DiffusionBackend = Literal[
+    "instruct-pix2pix",
+    "instruct_pix2pix",
+    "img2img",
+    "sd15",
+    "sdxl",
+    "sdxl-turbo",
+]
+CanonicalDiffusionBackend = Literal[
+    "instruct-pix2pix",
+    "img2img",
+    "sd15",
+    "sdxl",
+    "sdxl-turbo",
+]
 
 
 @dataclass(frozen=True)
@@ -23,7 +37,7 @@ class BackendPreset:
 
 @dataclass(frozen=True)
 class BackendConfig:
-    backend: DiffusionBackend
+    backend: CanonicalDiffusionBackend
     model_id: str
     pipeline: Literal["img2img", "instruct-pix2pix"]
     strength: float | None
@@ -33,13 +47,22 @@ class BackendConfig:
     max_side: int
 
 
-BACKEND_PRESETS: dict[DiffusionBackend, BackendPreset] = {
+BACKEND_PRESETS: dict[CanonicalDiffusionBackend, BackendPreset] = {
     "instruct-pix2pix": BackendPreset(
         model_id="timbrooks/instruct-pix2pix",
         pipeline="instruct-pix2pix",
         strength=None,
         guidance_scale=7.5,
         image_guidance_scale=1.2,
+        steps=30,
+        max_side=768,
+    ),
+    "img2img": BackendPreset(
+        model_id="runwayml/stable-diffusion-v1-5",
+        pipeline="img2img",
+        strength=0.25,
+        guidance_scale=7.5,
+        image_guidance_scale=None,
         steps=30,
         max_side=768,
     ),
@@ -71,7 +94,15 @@ BACKEND_PRESETS: dict[DiffusionBackend, BackendPreset] = {
         max_side=768,
     ),
 }
-BACKEND_CHOICES = tuple(BACKEND_PRESETS)
+BACKEND_ALIASES: dict[str, CanonicalDiffusionBackend] = {
+    "instruct_pix2pix": "instruct-pix2pix",
+    "instruct-pix2pix": "instruct-pix2pix",
+    "img2img": "img2img",
+    "sd15": "sd15",
+    "sdxl": "sdxl",
+    "sdxl-turbo": "sdxl-turbo",
+}
+BACKEND_CHOICES = tuple(BACKEND_ALIASES)
 DEFAULT_BACKEND: DiffusionBackend = "instruct-pix2pix"
 
 
@@ -90,7 +121,7 @@ def generate_recoloring(
     device: str | None = None,
     max_side: int | None = None,
 ) -> Path:
-    """Generate a recolored target image with HuggingFace Diffusers.
+    """Generate a recolored target image.
 
     Dependencies are optional. Install with: pip install -e ".[diffusion]".
     """
@@ -115,6 +146,8 @@ def generate_recoloring(
         raise ValueError("strength must be in [0, 1].")
     if config.steps < 1:
         raise ValueError("steps must be >= 1.")
+    if config.max_side < 8:
+        raise ValueError("max_side must be >= 8.")
     if config.image_guidance_scale is not None and config.image_guidance_scale < 1.0:
         raise ValueError("image_guidance_scale must be >= 1 for InstructPix2Pix.")
 
@@ -124,13 +157,13 @@ def generate_recoloring(
     original_size = source.size
     work_image = _resize_for_diffusion(source, max_side=config.max_side)
 
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = _resolve_device(torch, device)
     dtype = torch.float16 if device == "cuda" else torch.float32
 
     generator = None
     if seed is not None:
-        generator = torch.Generator(device=device).manual_seed(seed)
+        generator_device = "cuda" if device == "cuda" else "cpu"
+        generator = torch.Generator(device=generator_device).manual_seed(seed)
 
     if config.pipeline == "instruct-pix2pix":
         result = _generate_instruct_pix2pix(
@@ -148,13 +181,15 @@ def generate_recoloring(
         )
     else:
         result = _generate_img2img(
+            torch=torch,
+            backend=config.backend,
             model_id=config.model_id,
             dtype=dtype,
             device=device,
             prompt=prompt,
             negative_prompt=negative_prompt,
             image=work_image,
-            strength=config.strength or 0.55,
+            strength=config.strength if config.strength is not None else 0.25,
             guidance_scale=config.guidance_scale,
             steps=config.steps,
             generator=generator,
@@ -176,7 +211,7 @@ def resolve_backend_config(
     steps: int | None = None,
     max_side: int | None = None,
 ) -> BackendConfig:
-    selected_backend = backend or _infer_backend(model_id)
+    selected_backend = _normalize_backend(backend or _infer_backend(model_id))
     preset = BACKEND_PRESETS[selected_backend]
     return BackendConfig(
         backend=selected_backend,
@@ -194,9 +229,17 @@ def resolve_backend_config(
     )
 
 
-def _infer_backend(model_id: str | None) -> DiffusionBackend:
+def _normalize_backend(backend: DiffusionBackend | str) -> CanonicalDiffusionBackend:
+    try:
+        return BACKEND_ALIASES[backend]
+    except KeyError as exc:
+        choices = ", ".join(BACKEND_CHOICES)
+        raise ValueError(f"Unknown diffusion backend: {backend}. Choices: {choices}") from exc
+
+
+def _infer_backend(model_id: str | None) -> CanonicalDiffusionBackend:
     if model_id is None:
-        return DEFAULT_BACKEND
+        return _normalize_backend(DEFAULT_BACKEND)
     normalized = model_id.lower()
     if "instruct-pix2pix" in normalized:
         return "instruct-pix2pix"
@@ -204,10 +247,34 @@ def _infer_backend(model_id: str | None) -> DiffusionBackend:
         return "sdxl-turbo"
     if "xl" in normalized or "sdxl" in normalized:
         return "sdxl"
-    return "sd15"
+    return "img2img"
+
+
+def _resolve_device(torch, requested: str | None) -> str:
+    if requested is not None:
+        if requested == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("Requested device 'cuda', but CUDA is not available.")
+        if requested == "mps" and not _mps_available(torch):
+            raise RuntimeError("Requested device 'mps', but MPS is not available.")
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    if _mps_available(torch):
+        return "mps"
+    return "cpu"
+
+
+def _mps_available(torch) -> bool:
+    return bool(
+        hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_built()
+        and torch.backends.mps.is_available()
+    )
 
 
 def _generate_img2img(
+    torch,
+    backend: CanonicalDiffusionBackend,
     model_id: str,
     dtype,
     device: str,
@@ -219,19 +286,27 @@ def _generate_img2img(
     steps: int,
     generator,
 ) -> Image.Image:
-    from diffusers import AutoPipelineForImage2Image
+    if backend in {"img2img", "sd15"}:
+        from diffusers import StableDiffusionImg2ImgPipeline
 
-    pipeline = AutoPipelineForImage2Image.from_pretrained(model_id, torch_dtype=dtype)
+        pipeline_cls = StableDiffusionImg2ImgPipeline
+    else:
+        from diffusers import AutoPipelineForImage2Image
+
+        pipeline_cls = AutoPipelineForImage2Image
+
+    pipeline = pipeline_cls.from_pretrained(model_id, torch_dtype=dtype)
     pipeline = pipeline.to(device)
-    return pipeline(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        image=image,
-        strength=strength,
-        guidance_scale=guidance_scale,
-        num_inference_steps=steps,
-        generator=generator,
-    ).images[0]
+    with torch.inference_mode():
+        return pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=image,
+            strength=strength,
+            guidance_scale=guidance_scale,
+            num_inference_steps=steps,
+            generator=generator,
+        ).images[0].convert("RGB")
 
 
 def _generate_instruct_pix2pix(
@@ -270,7 +345,7 @@ def _generate_instruct_pix2pix(
             guidance_scale=guidance_scale,
             image_guidance_scale=image_guidance_scale,
             generator=generator,
-        ).images[0]
+        ).images[0].convert("RGB")
 
 
 def _resize_for_diffusion(image: Image.Image, max_side: int) -> Image.Image:

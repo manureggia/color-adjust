@@ -2,7 +2,7 @@
 
 Progetto Python per ricolorare un'immagine mantenendo il contenuto originale. L'idea e':
 
-1. ottenere un'immagine target ricolorata con un diffusion model, ChatGPT, Nanobanana o un altro strumento;
+1. ottenere un'immagine target ricolorata con un diffusion model locale o un altro strumento esterno;
 2. campionare coppie di pixel corrispondenti tra immagine originale e target;
 3. fittare una 3D LUT che approssima la trasformazione cromatica;
 4. applicare la LUT all'immagine originale;
@@ -110,11 +110,53 @@ color-adjust fit \
   --luma-tolerance 0.18
 ```
 
+## Refinement con residual mascherato
+
+Quando la target contiene effetti locali che una singola LUT globale non puo' rappresentare bene, puoi usare `refine`. Il comando fitta comunque la LUT globale, poi applica una correzione residual solo nelle zone selezionate da una maschera morbida:
+
+```bash
+color-adjust refine \
+  --input data/originale.jpg \
+  --target outputs/target_ricolorata.png \
+  --output outputs/ricolorata_refined.png \
+  --lut-output outputs/ricolorata_lut.png \
+  --lut outputs/trasformazione.cube \
+  --mask outputs/residual_mask.png \
+  --comparison outputs/refined_comparison.png \
+  --report-json outputs/refined_metrics.json
+```
+
+La comparison del refine ha quattro pannelli: originale, target, risultato LUT e risultato refined. Il report JSON confronta le metriche della LUT pura con quelle del refined.
+
+Parametri utili:
+
+- `--residual-alpha`: intensita' della correzione residual;
+- `--mask-threshold`: differenza colore minima prima di applicare la correzione;
+- `--mask-softness`: morbidezza della soglia;
+- `--mask-blur-radius`: sfocatura spaziale della maschera;
+- `--max-residual`: limite massimo della correzione per canale RGB;
+- `--positive-luma-only`: usa il residual solo dove la target diventa piu' luminosa.
+
+Puoi attivare lo stesso passaggio direttamente nella pipeline:
+
+```bash
+color-adjust pipeline \
+  --input data/originale.jpg \
+  --target outputs/target_ricolorata.png \
+  --output outputs/ricolorata_lut.png \
+  --refine \
+  --refined-output outputs/ricolorata_refined.png \
+  --refined-mask outputs/residual_mask.png \
+  --refined-comparison outputs/refined_comparison.png \
+  --refined-report-json outputs/refined_metrics.json
+```
+
 ## Uso con Diffusers
 
 Backend disponibili:
 
-- `instruct-pix2pix`: consigliato per istruzioni di editing, ad esempio cambiare globalmente il color grading;
+- `instruct-pix2pix` / `instruct_pix2pix`: consigliato per istruzioni di editing, ad esempio cambiare globalmente il color grading;
+- `img2img`: Stable Diffusion 1.5 image-to-image con `strength` basso di default (`0.25`), pensato per preservare contenuto e geometria;
 - `sdxl`: SDXL image-to-image generico;
 - `sdxl-turbo`: SDXL Turbo, piu' veloce ma con parametri diversi;
 - `sd15`: Stable Diffusion 1.5 image-to-image.
@@ -125,7 +167,7 @@ Il backend predefinito e' `instruct-pix2pix`. Non serve ricordare il model id Hu
 color-adjust pipeline \
   --input data/originale.jpg \
   --prompt "make the whole photograph warm golden hour, only change the color grading, preserve all objects and geometry" \
-  --backend instruct-pix2pix
+  --diffusion_backend instruct_pix2pix
 ```
 
 Per InstructPix2Pix, `--strength` non viene usato. Il parametro piu' importante e':
@@ -147,6 +189,33 @@ Se ometti i path di output, `pipeline` salva automaticamente tutti i file utili 
 ```
 
 La comparison image affianca originale, target diffusion e immagine finale ottenuta applicando la LUT all'originale.
+
+Modalita' Stable Diffusion img2img a strength basso:
+
+```bash
+color-adjust pipeline \
+  --input data/input.jpg \
+  --prompt "cinematic warm sunset color grading, same scene, same objects, preserve details" \
+  --negative_prompt "new objects, changed geometry, distorted shapes, extra details, different scene, different composition" \
+  --diffusion_backend img2img \
+  --strength 0.25 \
+  --guidance_scale 7.5 \
+  --num_inference_steps 30 \
+  --seed 42
+```
+
+Equivalente con `python` dal repository:
+
+```bash
+.venv/bin/python -m color_adjust pipeline \
+  --input data/input.jpg \
+  --prompt "cinematic warm sunset color grading, same scene, same objects, preserve details" \
+  --diffusion_backend img2img \
+  --strength 0.25 \
+  --guidance_scale 7.5 \
+  --num_inference_steps 30 \
+  --seed 42
+```
 
 ```bash
 color-adjust pipeline \
@@ -177,8 +246,51 @@ color-adjust apply \
 
 Esempi:
 
-- `same image content, warm sunset color grading, preserve geometry and objects`
-- `same scene, cold blue winter color palette, preserve all details`
-- `same photo, vintage film colors, faded highlights, preserve composition`
-- `same image, high contrast black and gold color grading, preserve objects`
+- `cinematic warm sunset color grading, same scene, same objects, preserve details`
+- `cold winter blue color grading, same scene, same objects, preserve structure`
+- `teal and orange cinematic color grading, preserve the original content`
+- `vintage film color grading, same composition, same objects`
+- `high contrast dramatic color grading, preserve image structure`
 
+Negative prompt consigliato:
+
+- `new objects, changed geometry, distorted shapes, extra details, different scene, different composition`
+
+## Eseguire prompt su un dataset
+
+Lo script `scripts/run_dataset_prompts.py` lancia `color_adjust pipeline` su tutte le immagini di una cartella e su tutti i prompt presenti in un file di testo. Serve per testare in batch piu' prompt di ricolorazione sulle stesse immagini.
+
+Uso base:
+
+```bash
+source .venv/bin/activate 
+python scripts/run_dataset_prompts.py \
+  --dataset-dir data/dataset \
+  --prompts data/best.txt \
+  --output-dir data/results_best \
+  --backend instruct_pix2pix \
+  --image-guidance-scale 1.2 \
+  --seed 0
+```
+
+Il file passato con `--prompts` contiene un prompt per riga. Le righe vuote e quelle che iniziano con `#` vengono ignorate. Se una riga inizia con `negative:`, il testo dopo i due punti viene usato come negative prompt globale per tutte le esecuzioni.
+
+Per ogni coppia immagine/prompt lo script crea una sottocartella dentro `--output-dir` e salva:
+
+- target generata dal diffusion model: `*_target.png`;
+- immagine finale ottenuta tramite LUT: `*_lut.png`;
+- LUT in formato `.cube`: `*_lut.cube`;
+- metriche PSNR/SSIM: `*_metrics.json`;
+- confronto originale/target/LUT: `*_comparison.png`;
+- manifest della singola esecuzione con prompt e comando usato: `*_run.json`.
+
+Di default lo script cerca immagini ricorsivamente in `--dataset-dir` con estensioni comuni (`jpg`, `png`, `webp`, `bmp`, `tif`, `tiff`). Usa `--no-recursive` per leggere solo i file direttamente nella cartella indicata.
+
+Opzioni utili:
+
+- `--dry-run`: stampa i comandi e scrive i manifest senza generare immagini;
+- `--keep-going`: continua con le altre immagini anche se una generazione fallisce;
+- `--negative-prompt "..."`: sovrascrive l'eventuale riga `negative:` del file prompt;
+- `--steps`, `--device`, `--max-side`, `--samples`, `--method`, `--luma-tolerance`: vengono inoltrate a `color_adjust pipeline`.
+
+Per InstructPix2Pix, `--image-guidance-scale` controlla quanto il risultato resta vicino all'immagine originale: valori tipici da provare sono `1.0`, `1.2` e `1.5`.
